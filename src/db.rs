@@ -4,7 +4,7 @@ use dotenv::dotenv;
 use mongodb::{bson::{self, doc, Document}, options::{ClientOptions, UpdateOptions}, Client, Collection, Database};
 use futures::stream::StreamExt;
 
-use crate::models::Recipe;
+use crate::models::{Filters, Recipe};
 
 
 #[derive(Error, Debug)]
@@ -46,36 +46,130 @@ pub async fn read_recipe(collection: &Collection<Recipe>, id: &str) -> mongodb::
     }
 }
 
-pub async fn filter_recipes(collection: &Collection<Recipe>, filter: Document) -> Result<Vec<Recipe>, RecipeError> {
-    let mut cursor = collection.find(filter, None).await?;
+pub async fn filter_recipes(collection: &Collection<Recipe>, filters: Filters, page: usize) -> Result<Vec<Recipe>, RecipeError> {
+    let mut filter = doc! {};
+
+    if !filters.query.is_empty() {
+        filter.insert("$or", vec![
+            doc! { "title": { "$regex": filters.query.clone() } },
+            doc! { "summary": { "$regex": filters.query.clone() } }
+        ]);
+    }
+
+    if !filters.diets.is_empty() {
+        filter.insert("diets", doc! { "$in": filters.diets });
+    };
+
+    if !filters.cuisines.is_empty() {
+        filter.insert("cuisines", doc! { "$in": filters.cuisines });
+    };
+
+    if !filters.dish_types.is_empty() {
+        filter.insert("dish_types", doc! { "$in": filters.dish_types });
+    };
+
+    if filters.min_servings > 0 {
+        filter.insert("servings", doc! { "$gte": filters.min_servings });
+    };
+
+    if filters.max_calories > 0.0 {
+        filter.insert("nutrition.nutrients", doc! { 
+            "$elemMatch": { "name": "Fats", "amount": { "$lte": filters.max_calories } }
+        });
+    };
+
+    if filters.max_fats > 0.0 {
+        filter.insert("nutrition.nutrients", doc! { 
+            "$elemMatch": { "name": "Fats", "amount": { "$lte": filters.max_fats } }
+        });
+    };
+
+    if filters.max_carbs > 0.0 {
+        filter.insert("nutrition.nutrients", doc! { 
+            "$elemMatch": { "name": "Carbohydrates", "amount": { "$lte": filters.max_carbs } }
+        });
+    };
+
+    if filters.max_glycemic_index > 0.0 {
+        filter.insert("nutrition.properties", doc! {
+            "$elemMatch": { "name": "Glycemic Index", "amount": { "$lte": filters.max_glycemic_index } }
+        });
+    };
+
+    if filters.healthy {
+        filter.insert("nutrition.properties", doc! {
+            "$elemMatch": {
+                "name": "Nutrition Score",
+                "amount": { "$gte": 60.0 }
+            }
+        });
+    };
+
+    let skip = (page - 1) * 15;
+
+    let mut cursor = collection
+        .find(filter, None)
+        .await?
+        .skip(skip)
+        .take(15);
+
     let mut recipes: Vec<Recipe> = Vec::new();
 
     while let Some(result) = cursor.next().await {
         match result {
-            Ok(recipe) => {
-                recipes.push(recipe)
-            },
+            Ok(recipe) => { recipes.push(recipe) },
             Err(e) => return Err(RecipeError::DatabaseError(e))
         }
-    }
+    };
 
     Ok(recipes)
 }
 
-pub async fn list_recipes(collection: &Collection<Recipe>) -> Result<Vec<Recipe>, RecipeError> {
-    let mut cursor = collection.find(None, None).await?;
-    let mut recipes: Vec<Recipe> = Vec::new();
+pub async fn list_recipes(collection: &Collection<Recipe>, limit: Option<usize>, page: Option<usize>) -> Result<Vec<Recipe>, RecipeError> {
 
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(recipe) => {
-                recipes.push(recipe)
-            },
-            Err(e) => return Err(RecipeError::DatabaseError(e))
+    if limit.is_some() {
+        let mut cursor = collection
+            .find(None, None)
+            .await?
+            .take(limit.unwrap());
+
+        let mut recipes: Vec<Recipe> = Vec::new();
+    
+        while let Some(result) = cursor.next().await {
+            match result {
+                Ok(recipe) => {
+                    recipes.push(recipe)
+                },
+                Err(e) => return Err(RecipeError::DatabaseError(e))
+            }
         }
-    }
+    
+        Ok(recipes)
+    } else if page.is_some() {
+        let skip = (page.unwrap() - 1) * 15;
 
-    Ok(recipes)
+        let mut cursor = collection
+            .find(None, None)
+            .await?
+            .skip(skip)
+            .take(15);
+
+        let mut recipes: Vec<Recipe> = Vec::new();
+    
+        while let Some(result) = cursor.next().await {
+            match result {
+                Ok(recipe) => {
+                    recipes.push(recipe)
+                },
+                Err(e) => return Err(RecipeError::DatabaseError(e))
+            }
+        }
+    
+        Ok(recipes)
+    } else {
+        Err(RecipeError::Unknown)
+    }
+    
 }
 
 pub async fn update_recipe(collection: &Collection<Recipe>, id: &str, updated_recipe: Document) -> mongodb::error::Result<()> {

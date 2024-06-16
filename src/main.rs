@@ -44,7 +44,10 @@ async fn main() -> std::io::Result<()> {
             .wrap(logger)
             .app_data(web::Data::new(database.clone()))
             .service(web::resource("/recipes").to(api::get_data))
-            .service(web::resource("/recipe").to(api::get_data))
+            .service(web::resource("/recipe").to(api::get_single_data))
+            .service(web::resource("/create").to(api::create_data))
+            .service(web::resource("/update").to(api::update_data))
+            .service(web::resource("/delete").to(api::delete_data))
     })
     .bind(("0.0.0.0", 8000))?
     .run();

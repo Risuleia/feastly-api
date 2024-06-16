@@ -4,85 +4,91 @@ use actix_web::{
     Responder,
     HttpRequest
 };
-use sqlx::{ SqlitePool, prelude::FromRow };
+use mongodb::Database;
 use serde::{ Serialize, Deserialize };
 
-#[derive(Serialize, Deserialize, FromRow, Clone)]
-pub struct Post {
-    id: String,
-    low_res_url: String,
-    high_res_url: String,
-    caption: String,
-    permalink: String,
-    timestamp: String
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct GroupedRecipe {
-    date: String,
-    posts: Vec<Post>
-}
+use crate::{db::{self, create_recipe, delete_recipe, filter_recipes, read_recipe, update_recipe}, models::{Filters, Recipe}};
 
 #[derive(Deserialize)]
-pub struct QueryParams {
+pub struct MultipleQueryParams {
     #[serde(default)]
-    limit: Option<i64>,
+    limit: Option<usize>,
     #[serde(default)]
     page: Option<usize>
+}
+#[derive(Deserialize)]
+pub struct SingleQueryParams {
+    #[serde(default)]
+    id: Option<i64>
+}
+#[derive(Deserialize)]
+pub struct Payload {
+    recipe: Recipe
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct PaginatedResult {
     total_pages: usize,
     current_page: usize,
-    recipes: Vec<GroupedRecipe>
+    recipes: Vec<Recipe>
 }
 
 
 pub async fn get_data(
-    pool: web::Data<SqlitePool>,
+    database: web::Data<Database>,
     req: HttpRequest,
-    params: web::Query<QueryParams>
+    filters: Option<web::Json<Filters>>,
+    params: web::Query<MultipleQueryParams>
 ) -> impl Responder {
-
     let auth_header = req.headers().get("Authorization");
 
     if let Some(header_value) = auth_header {
         if let Ok(header_str) = header_value.to_str() {
 
-            let access_token = header_str.trim();
+            let api_key = header_str.trim();
             let expected_token = "0e89498d5b964f4aa2063ab28eb23a45";
 
-            if !access_token.is_empty() && access_token == expected_token {
+            let limit = params.limit.unwrap_or(5);
+            let page = params.page.unwrap_or(1);
 
-                match (params.limit, params.page) {
-                    (Some(limit), _) if limit > 0 => {
-                        let query = format!("SELECT * FROM feed LIMIT {}", limit);
-        
-                        let result = sqlx::query_as::<_, Post>(&query)
-                            .fetch_all(pool.get_ref())
-                            .await;
-        
-                        return match result {
-                            Ok(data) => HttpResponse::Ok().json(data),
-                            Err(_) => HttpResponse::InternalServerError().finish(),
+            if !api_key.is_empty() && api_key == expected_token {
+                let collection = database.collection("Recipes");
+
+                if limit > 0 && page > 0 {
+                    return HttpResponse::BadRequest().finish();
+                }
+
+                if let Some(filters) = filters {
+                    let factored_filters = Filters {
+                        query: filters.query.clone(),
+                        diets: filters.diets.clone(),
+                        max_ready_time: filters.max_ready_time,
+                        min_servings: filters.min_servings,
+                        cuisines: filters.cuisines.clone(),
+                        dish_types: filters.dish_types.clone(),
+                        max_calories: filters.max_calories,
+                        max_fats: filters.max_carbs,
+                        max_carbs: filters.max_carbs,
+                        max_glycemic_index: filters.max_glycemic_index,
+                        healthy: filters.healthy
+                    };
+
+                    let recipes_result = filter_recipes(&collection, factored_filters, page).await;
+                    match recipes_result {
+                        Ok(recipes) => HttpResponse::Ok().json(recipes),
+                        Err(_) => HttpResponse::InternalServerError().finish()
+                    };
+                } else {
+                    if limit > 0 {
+                        let recipes_result = db::list_recipes(&collection, Some(limit), None).await;
+                        
+                        match recipes_result {
+                            Ok(recipes) => HttpResponse::Ok().json(recipes),
+                            Err(_) => HttpResponse::InternalServerError().finish()
                         };
+                    } else {
+                        HttpResponse::BadRequest().finish();
                     }
-                    (_, Some(page)) if page > 0 => {
-                        let all_posts = sqlx::query_as::<_, Post>("SELECT * FROM feed")
-                            .fetch_all(pool.get_ref())
-                            .await;
-        
-                        match all_posts {
-                            Ok(posts) => {
-                                let posts_per_page = 5;
-                                let data = format_data(posts, posts_per_page, page);
-                                return HttpResponse::Ok().json(data);
-                            },
-                            Err(_) => return HttpResponse::InternalServerError().finish()
-                        }
-                    }
-                    _ => return HttpResponse::BadRequest().finish()
                 }
 
             }
@@ -94,48 +100,124 @@ pub async fn get_data(
 
 }
 
+pub async fn get_single_data(
+    database: web::Data<Database>,
+    req: HttpRequest,
+    params: web::Query<SingleQueryParams>
+) -> impl Responder {
+    let auth_header = req.headers().get("Authorization");
 
-fn format_data(posts: Vec<Post>, posts_per_page: usize, page: usize) -> PaginatedResult {
-    
-    let mut grouped_posts: std::collections::HashMap<String, Vec<Post>> = std::collections::HashMap::new();
-    
-    for post in &posts {
-        let date = extract_date(&post.timestamp);
-        grouped_posts.entry(date).or_insert_with(Vec::new).push(post.clone());
+    if let Some(header_value) = auth_header {
+        if let Ok(header_str) = header_value.to_str() {
+
+            let api_key = header_str.trim();
+            let expected_token = "0e89498d5b964f4aa2063ab28eb23a45";
+
+            if !api_key.is_empty() && api_key == expected_token {
+                if params.id.is_some() {
+                    let collection = database.collection("Recipes");
+
+                    return match read_recipe(&collection, &params.id.unwrap().to_string()).await {
+                        Ok(recipe) => HttpResponse::Ok().json(recipe.unwrap()),
+                        Err(_) => HttpResponse::InternalServerError().finish()
+                    };
+                } else {
+                    return HttpResponse::BadRequest().finish();
+                }
+            }
+        }
     }
 
-    let mut paginated_results: Vec<GroupedRecipe> = grouped_posts
-        .into_iter()
-        .map(|(date, posts)| GroupedRecipe { date, posts })
-        .collect();
-
-    if paginated_results.is_empty() { return PaginatedResult { total_pages: 1, current_page: 1, posts: Vec::new() } };
-    let cloned = paginated_results.clone();
-
-    paginated_results.sort_by(|a, b| b.date.cmp(&a.date));
-
-    let mut last_page_start_index = (paginated_results.len() - 1) * posts_per_page;
-    let mut start_index = std::cmp::min(last_page_start_index, (page - 1) * posts_per_page);
-    let total_pages = calculate_total_pages(cloned.len(), posts_per_page);
-
-    if start_index >= total_pages * posts_per_page {
-        last_page_start_index = (total_pages - 1) * posts_per_page;
-        start_index = std::cmp::max(0, last_page_start_index);
-    }
-
-    let posts_result = paginated_results.into_iter().skip(start_index).take(posts_per_page).collect();
-    PaginatedResult {
-        total_pages,
-        current_page: std::cmp::min(total_pages, page),
-        posts: posts_result
-    }
-
+    HttpResponse::Unauthorized().finish()
 }
 
-fn extract_date(timestamp: &str) -> String {
-    timestamp.split('T').next().unwrap_or_default().to_string()
+pub async fn create_data(
+    database: web::Data<Database>,
+    payload: web::Json<Payload>,
+    req: HttpRequest,
+) -> impl Responder {
+    let auth_header = req.headers().get("Authorization");
+
+    if let Some(header_value) = auth_header {
+        if let Ok(header_str) = header_value.to_str() {
+
+            let api_key = header_str.trim();
+            let expected_token = "0e89498d5b964f4aa2063ab28eb23a45";
+
+            if !api_key.is_empty() && api_key == expected_token {
+                let collection = database.collection("Recipes");
+
+                return match create_recipe(&collection, &payload.recipe).await {
+                    Ok(_) => HttpResponse::Created().finish(),
+                    Err(_) => HttpResponse::InternalServerError().finish()
+                };
+            }
+        }
+    }
+
+    HttpResponse::Unauthorized().finish()
 }
 
-fn calculate_total_pages(total_posts: usize, posts_per_page: usize) -> usize {
-    (total_posts + posts_per_page - 1) / posts_per_page
+pub async fn delete_data(
+    database: web::Data<Database>,
+    req: HttpRequest,
+    params: web::Query<SingleQueryParams>
+) -> impl Responder {
+    let auth_header = req.headers().get("Authorization");
+
+    if let Some(header_value) = auth_header {
+        if let Ok(header_str) = header_value.to_str() {
+
+            let api_key = header_str.trim();
+            let expected_token = "0e89498d5b964f4aa2063ab28eb23a45";
+
+            if !api_key.is_empty() && api_key == expected_token {
+                if params.id.is_some() {
+                    let collection = database.collection("Recipes");
+
+                    return match delete_recipe(&collection, &params.id.unwrap().to_string()).await {
+                        Ok(_) => HttpResponse::Accepted().finish(),
+                        Err(_) => HttpResponse::InternalServerError().finish()
+                    };
+                } else {
+                    return HttpResponse::BadRequest().finish();
+                }
+            }
+        }
+    }
+
+    HttpResponse::Unauthorized().finish()
+}
+
+pub async fn update_data(
+    database: web::Data<Database>,
+    payload: web::Json<Payload>,
+    req: HttpRequest,
+    params: web::Query<SingleQueryParams>
+) -> impl Responder {
+    let auth_header = req.headers().get("Authorization");
+
+    if let Some(header_value) = auth_header {
+        if let Ok(header_str) = header_value.to_str() {
+
+            let api_key = header_str.trim();
+            let expected_token = "0e89498d5b964f4aa2063ab28eb23a45";
+
+            if !api_key.is_empty() && api_key == expected_token {
+                if params.id.is_some() {
+                    let collection = database.collection("Recipes");
+    
+                    return match update_recipe(&collection, &params.id.unwrap().to_string(), payload.recipe.to_document()).await {
+                        Ok(_) => HttpResponse::Created().finish(),
+                        Err(_) => HttpResponse::InternalServerError().finish()
+                    };
+                } else {
+                    return HttpResponse::BadRequest().finish();
+                }
+
+            }
+        }
+    }
+
+    HttpResponse::Unauthorized().finish()
 }
