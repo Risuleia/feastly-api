@@ -30,31 +30,30 @@ async fn main() -> std::io::Result<()> {
     let database = db::connect().await;
     let database2 = database.clone();
     
-    // env_logger::init();
+    env_logger::init();
     
-    // let server = HttpServer::new(move || {
-    //     let logger = Logger::default();
-    //     App::new()
-    //         .wrap(Cors::default()
-    //             .allow_any_origin()
-    //             .allowed_methods(vec!["GET"])
-    //             .allowed_headers(vec![http::header::AUTHORIZATION, http::header::ACCEPT])
-    //             .supports_credentials()
-    //         )
-    //         .wrap(logger)
-    //         .app_data(web::Data::new(database.clone()))
-    //         .service(web::resource("/recipes").to(api::get_data))
-    //         .service(web::resource("/recipes").to(api::get_data))
-    // })
-    // .bind(("0.0.0.0", 8000))?
-    // .run();
+    let server = HttpServer::new(move || {
+        let logger = Logger::default();
+        App::new()
+            .wrap(Cors::default()
+                .allow_any_origin()
+                .allowed_methods(vec!["GET"])
+                .allowed_headers(vec![http::header::AUTHORIZATION, http::header::ACCEPT])
+                .supports_credentials()
+            )
+            .wrap(logger)
+            .app_data(web::Data::new(database.clone()))
+            .service(web::resource("/recipes").to(api::get_data))
+            .service(web::resource("/recipe").to(api::get_data))
+    })
+    .bind(("0.0.0.0", 8000))?
+    .run();
 
-    // tokio::spawn(server);
-    fetch_data::fetch_and_store_recipes(&access_token, &database2).await;
-    Ok(())
+    tokio::spawn(server);
 
-    // loop {
-    //     sleep(Duration::from_secs(43200)).await;
-    // }
+    loop {
+        sleep(Duration::from_secs(43200)).await;
+        fetch_data::fetch_and_store_recipes(&access_token, &database2).await;
+    }
 
 }
